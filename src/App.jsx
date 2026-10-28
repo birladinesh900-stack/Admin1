@@ -16,8 +16,7 @@ import {
   Shield,
   Save,
 } from 'lucide-react';
-
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://backend1-tawny.vercel.app/api';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('pins'); // pins, overview, monitor, broadcast, db
@@ -293,7 +292,7 @@ export default function App() {
               <div className={`pulse-dot ${isServerOnline ? '' : 'offline'}`} />
               {isServerOnline ? 'Backend Online' : 'Backend Offline'}
             </span>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>:5000</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>Vercel</span>
           </div>
         </div>
       </aside>

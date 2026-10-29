@@ -15,8 +15,20 @@ import {
   Key,
   Shield,
   Save,
+  Check,
+  CheckCheck,
+  Clock,
+  Timer,
+  Search,
+  ArrowUpDown,
 } from 'lucide-react';
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://backend1-tawny.vercel.app/api';
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  (typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? 'http://localhost:5000/api'
+    : 'https://backend1-tawny.vercel.app/api');
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('pins'); // pins, overview, monitor, broadcast, db
@@ -24,11 +36,18 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [users, setUsers] = useState([]);
   const [messages, setMessages] = useState([]);
+  const [sessionMessages, setSessionMessages] = useState([]);
   const [broadcastText, setBroadcastText] = useState('');
   const [isSendingBroadcast, setIsSendingBroadcast] = useState(false);
   const [theme, setTheme] = useState('light');
   const [notification, setNotification] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Live Chat Feed States
+  const [feedFilter, setFeedFilter] = useState('all'); // 'all' | 'active' | 'seen' | 'unseen' | 'expired'
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortOrder, setSortOrder] = useState('desc'); // 'desc' | 'asc'
+  const [nowTick, setNowTick] = useState(Date.now());
 
   // Secret PIN Management States
   const [pins, setPins] = useState({ user1Pin: '2021', user2Pin: '2022' });
@@ -39,6 +58,14 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
+
+  // Live ticker for second-by-second countdown in Timer column
+  useEffect(() => {
+    const ticker = setInterval(() => {
+      setNowTick(Date.now());
+    }, 1000);
+    return () => clearInterval(ticker);
+  }, []);
 
   // Fetch all chat telemetry & PINs
   const fetchData = async () => {
@@ -97,7 +124,29 @@ export default function App() {
         const msgsRes = await fetch(`${API_BASE_URL}/messages`);
         if (msgsRes.ok) {
           const msgsData = await msgsRes.json();
-          setMessages(msgsData.data || []);
+          const incoming = msgsData.data || [];
+          setMessages(incoming);
+
+          // Update session messages accumulator so admin can still review ephemeral history
+          setSessionMessages((prev) => {
+            const map = new Map();
+            prev.forEach((m) => {
+              const k = m._id || (m.createdAt + '_' + m.text);
+              map.set(k, { ...m });
+            });
+            const incomingKeys = new Set();
+            incoming.forEach((m) => {
+              const k = m._id || (m.createdAt + '_' + m.text);
+              incomingKeys.add(k);
+              map.set(k, { ...m, inDb: true });
+            });
+            for (const [k, v] of map.entries()) {
+              if (!incomingKeys.has(k)) {
+                map.set(k, { ...v, inDb: false, isPurged: true });
+              }
+            }
+            return Array.from(map.values());
+          });
         }
       } catch (e) {
         console.log(e);
@@ -109,7 +158,7 @@ export default function App() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 4000);
+    const interval = setInterval(fetchData, 2000);
     return () => clearInterval(interval);
   }, []);
 
@@ -179,7 +228,7 @@ export default function App() {
 
   // Handle Clear Messages
   const handleClearMessages = async () => {
-    if (!window.confirm('Delete all messages in database?')) {
+    if (!window.confirm('Delete all messages in database and clear admin feed?')) {
       return;
     }
 
@@ -188,6 +237,7 @@ export default function App() {
       if (res.ok) {
         showNotification('Chat history cleared.');
         setMessages([]);
+        setSessionMessages([]);
         fetchData();
       }
     } catch (e) {
@@ -616,85 +666,418 @@ export default function App() {
         )}
 
         {/* Live Chat Monitor Tab */}
-        {activeTab === 'monitor' && (
-          <div className="glass-panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <MessageSquare size={20} color="#2563eb" />
-                Live Conversation Feed — {messages.length} messages
-              </div>
-              <button
-                onClick={handleClearMessages}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '8px 14px',
-                  borderRadius: 'var(--radius-sm)',
-                  background: '#fef2f2',
-                  border: '1px solid #fecaca',
-                  color: '#dc2626',
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                <Trash2 size={14} />
-                Clear Chat History
-              </button>
-            </div>
+        {activeTab === 'monitor' && (() => {
+          const allFeedItems = sessionMessages.length > 0 ? sessionMessages : messages;
 
-            <div className="table-responsive">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Timestamp</th>
-                    <th>Sender</th>
-                    <th>Receiver</th>
-                    <th>Message</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {messages.length === 0 ? (
+          const counts = {
+            all: allFeedItems.length,
+            active: allFeedItems.filter((m) => !m.isPurged).length,
+            seen: allFeedItems.filter((m) => !!m.readAt).length,
+            unseen: allFeedItems.filter((m) => !m.readAt).length,
+            expired: allFeedItems.filter(
+              (m) => m.isPurged || (m.deleteAt && new Date(m.deleteAt).getTime() <= nowTick)
+            ).length,
+          };
+
+          const filteredFeedMessages = allFeedItems
+            .filter((msg) => {
+              if (feedFilter === 'active' && msg.isPurged) return false;
+              if (feedFilter === 'seen' && !msg.readAt) return false;
+              if (feedFilter === 'unseen' && msg.readAt) return false;
+              if (
+                feedFilter === 'expired' &&
+                !msg.isPurged &&
+                (!msg.deleteAt || new Date(msg.deleteAt).getTime() > nowTick)
+              ) {
+                return false;
+              }
+
+              if (searchQuery.trim()) {
+                const q = searchQuery.toLowerCase();
+                const textMatch = msg.text?.toLowerCase().includes(q);
+                const senderMatch = msg.senderId?.toLowerCase().includes(q);
+                const receiverMatch = msg.receiverId?.toLowerCase().includes(q);
+                if (!textMatch && !senderMatch && !receiverMatch) return false;
+              }
+              return true;
+            })
+            .sort((a, b) => {
+              const tA = new Date(a.createdAt || 0).getTime();
+              const tB = new Date(b.createdAt || 0).getTime();
+              return sortOrder === 'desc' ? tB - tA : tA - tB;
+            });
+
+          return (
+            <div className="glass-panel">
+              {/* Header with Telemetry Stats & Actions */}
+              <div className="panel-header">
+                <div className="panel-title">
+                  <MessageSquare size={20} color="#2563eb" />
+                  Live Chat Feed
+                  <div className="live-status-pill">
+                    <span className="pulse-dot" />
+                    <span>Auto-sync (2s)</span>
+                  </div>
+                </div>
+
+                <div className="panel-actions">
+                  <button
+                    onClick={() => setSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
+                    className="btn-toolbar"
+                    title="Toggle Sort Order"
+                  >
+                    <ArrowUpDown size={14} />
+                    <span>{sortOrder === 'desc' ? 'Newest First' : 'Oldest First'}</span>
+                  </button>
+
+                  <button
+                    onClick={handleClearMessages}
+                    className="btn-clear-chat"
+                    title="Clear All Messages in DB & Feed"
+                  >
+                    <Trash2 size={14} />
+                    <span>Clear Chat History</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Feed Controls: Search & Category Filters */}
+              <div className="feed-controls-bar">
+                <div className="search-input-wrapper">
+                  <Search size={14} className="search-icon" />
+                  <input
+                    type="text"
+                    placeholder="Search messages, user, text..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                  {searchQuery && (
+                    <button
+                      className="search-clear-btn"
+                      onClick={() => setSearchQuery('')}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+
+                <div className="feed-filter-chips">
+                  <button
+                    className={`filter-chip ${feedFilter === 'all' ? 'active' : ''}`}
+                    onClick={() => setFeedFilter('all')}
+                  >
+                    All Messages <span className="chip-count">{counts.all}</span>
+                  </button>
+                  <button
+                    className={`filter-chip ${feedFilter === 'active' ? 'active' : ''}`}
+                    onClick={() => setFeedFilter('active')}
+                  >
+                    Active in DB <span className="chip-count">{counts.active}</span>
+                  </button>
+                  <button
+                    className={`filter-chip ${feedFilter === 'seen' ? 'active' : ''}`}
+                    onClick={() => setFeedFilter('seen')}
+                  >
+                    Seen <span className="chip-count">{counts.seen}</span>
+                  </button>
+                  <button
+                    className={`filter-chip ${feedFilter === 'unseen' ? 'active' : ''}`}
+                    onClick={() => setFeedFilter('unseen')}
+                  >
+                    Unread <span className="chip-count">{counts.unseen}</span>
+                  </button>
+                  <button
+                    className={`filter-chip ${feedFilter === 'expired' ? 'active' : ''}`}
+                    onClick={() => setFeedFilter('expired')}
+                  >
+                    Expired <span className="chip-count">{counts.expired}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 7-Column Live Chat Feed Table */}
+              <div className="table-responsive">
+                <table className="live-feed-table">
+                  <thead>
                     <tr>
-                      <td colSpan={4} style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>
-                        No messages yet between User 1 and User 2.
-                      </td>
+                      <th style={{ minWidth: 130 }}>Timestamp</th>
+                      <th style={{ minWidth: 110 }}>Sender</th>
+                      <th style={{ minWidth: 110 }}>Receiver</th>
+                      <th style={{ minWidth: 240 }}>Message</th>
+                      <th style={{ minWidth: 120 }}>Send</th>
+                      <th style={{ minWidth: 125 }}>Seen</th>
+                      <th style={{ minWidth: 145 }}>Timer</th>
                     </tr>
-                  ) : (
-                    messages.map((msg, i) => (
-                      <tr key={msg._id || i}>
-                        <td style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
-                          {msg.createdAt ? new Date(msg.createdAt).toLocaleTimeString() : 'Just now'}
-                        </td>
-                        <td>
-                          <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>
-                            {msg.senderId === 'user_1'
-                              ? 'User 1'
-                              : msg.senderId === 'user_2'
-                              ? 'User 2'
-                              : 'Admin'}
-                          </span>
-                        </td>
-                        <td>
-                          <span style={{ color: 'var(--text-secondary)' }}>
-                            {msg.receiverId === 'user_1'
-                              ? 'User 1'
-                              : msg.receiverId === 'user_2'
-                              ? 'User 2'
-                              : msg.receiverId}
-                          </span>
-                        </td>
-                        <td style={{ maxWidth: 400, wordBreak: 'break-word', color: 'var(--text-primary)' }}>
-                          {msg.text}
+                  </thead>
+                  <tbody>
+                    {filteredFeedMessages.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={7}
+                          style={{
+                            textAlign: 'center',
+                            padding: '48px 20px',
+                            color: 'var(--text-muted)',
+                          }}
+                        >
+                          <MessageSquare
+                            size={32}
+                            style={{ opacity: 0.3, marginBottom: 8, display: 'inline-block' }}
+                          />
+                          <p style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-secondary)' }}>
+                            No messages match your current filter.
+                          </p>
+                          <p style={{ fontSize: 12, marginTop: 4 }}>
+                            {searchQuery
+                              ? 'Try clearing your search query.'
+                              : 'Waiting for messages between User 1 and User 2.'}
+                          </p>
                         </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ) : (
+                      filteredFeedMessages.map((msg, i) => {
+                        const isAdmin = msg.senderId === 'admin';
+                        const isU1 = msg.senderId === 'user_1';
+                        const isU2 = msg.senderId === 'user_2';
+
+                        const recIsU1 = msg.receiverId === 'user_1';
+                        const recIsU2 = msg.receiverId === 'user_2';
+
+                        // Timer logic
+                        let timerInfo = {
+                          type: 'waiting',
+                          label: '15s (On Seen)',
+                          sub: 'Starts on view',
+                        };
+
+                        if (isAdmin) {
+                          timerInfo = {
+                            type: 'permanent',
+                            label: '∞ Permanent',
+                            sub: 'Admin Broadcast',
+                          };
+                        } else if (msg.deleteAt) {
+                          const remainingMs = new Date(msg.deleteAt).getTime() - nowTick;
+                          const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+                          const pct = Math.min(100, Math.max(0, (remainingSec / 15) * 100));
+
+                          if (remainingSec > 0) {
+                            if (remainingSec <= 5) {
+                              timerInfo = {
+                                type: 'urgent',
+                                label: `${remainingSec}s left`,
+                                sub: 'Self-destructing',
+                                pct,
+                              };
+                            } else {
+                              timerInfo = {
+                                type: 'active',
+                                label: `${remainingSec}s left`,
+                                sub: 'Disappearing timer',
+                                pct,
+                              };
+                            }
+                          } else {
+                            timerInfo = {
+                              type: 'expired',
+                              label: '💥 Expired (0s)',
+                              sub: 'Purged from DB',
+                              pct: 0,
+                            };
+                          }
+                        } else if (msg.isPurged) {
+                          timerInfo = {
+                            type: 'expired',
+                            label: '💥 Expired',
+                            sub: 'Deleted from DB',
+                            pct: 0,
+                          };
+                        }
+
+                        return (
+                          <tr
+                            key={msg._id || i}
+                            className={msg.isPurged ? 'row-expired' : ''}
+                          >
+                            {/* 1. Timestamp */}
+                            <td className="cell-timestamp">
+                              <div className="time-primary">
+                                {msg.createdAt
+                                  ? new Date(msg.createdAt).toLocaleTimeString([], {
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                      second: '2-digit',
+                                    })
+                                  : 'Just now'}
+                              </div>
+                              <div className="time-secondary">
+                                {msg.createdAt
+                                  ? new Date(msg.createdAt).toLocaleDateString([], {
+                                      month: 'short',
+                                      day: 'numeric',
+                                    })
+                                  : ''}
+                              </div>
+                            </td>
+
+                            {/* 2. Sender */}
+                            <td>
+                              {isU1 && (
+                                <span className="user-badge-pill pill-user1">
+                                  <span className="user-dot">U1</span>
+                                  <span>User 1</span>
+                                </span>
+                              )}
+                              {isU2 && (
+                                <span className="user-badge-pill pill-user2">
+                                  <span className="user-dot">U2</span>
+                                  <span>User 2</span>
+                                </span>
+                              )}
+                              {isAdmin && (
+                                <span className="user-badge-pill pill-admin">
+                                  <Shield size={12} />
+                                  <span>Admin</span>
+                                </span>
+                              )}
+                              {!isU1 && !isU2 && !isAdmin && (
+                                <span className="user-badge-pill">
+                                  <span>{msg.senderName || msg.senderId}</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* 3. Receiver */}
+                            <td>
+                              {recIsU1 && (
+                                <span className="user-badge-pill pill-user1 subtle">
+                                  <span className="user-dot">U1</span>
+                                  <span>User 1</span>
+                                </span>
+                              )}
+                              {recIsU2 && (
+                                <span className="user-badge-pill pill-user2 subtle">
+                                  <span className="user-dot">U2</span>
+                                  <span>User 2</span>
+                                </span>
+                              )}
+                              {!recIsU1 && !recIsU2 && (
+                                <span className="user-badge-pill subtle">
+                                  <span>
+                                    {msg.receiverName || msg.receiverId || 'Both Users'}
+                                  </span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* 4. Message */}
+                            <td className="cell-message">
+                              <div
+                                className={`feed-msg-box ${isAdmin ? 'admin-post' : ''}`}
+                              >
+                                {isAdmin && (
+                                  <span className="feed-admin-tag">
+                                    <Radio size={11} /> Broadcast
+                                  </span>
+                                )}
+                                <span className="feed-msg-text">{msg.text}</span>
+                              </div>
+                            </td>
+
+                            {/* 5. Send */}
+                            <td>
+                              <div className="feed-status-cell">
+                                <span className="chip-badge chip-sent">
+                                  <Check size={12} />
+                                  <span>Sent</span>
+                                </span>
+                                <span className="chip-subtext">
+                                  {msg.createdAt
+                                    ? new Date(msg.createdAt).toLocaleTimeString([], {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                        second: '2-digit',
+                                      })
+                                    : 'Delivered'}
+                                </span>
+                              </div>
+                            </td>
+
+                            {/* 6. Seen */}
+                            <td>
+                              {msg.readAt ? (
+                                <div className="feed-status-cell">
+                                  <span className="chip-badge chip-seen">
+                                    <CheckCheck size={13} />
+                                    <span>Seen</span>
+                                  </span>
+                                  <span className="chip-subtext">
+                                    {new Date(msg.readAt).toLocaleTimeString([], {
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                      second: '2-digit',
+                                    })}
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className="feed-status-cell">
+                                  <span className="chip-badge chip-unseen">
+                                    <Clock size={12} />
+                                    <span>Unread</span>
+                                  </span>
+                                  <span className="chip-subtext text-muted">
+                                    Waiting
+                                  </span>
+                                </div>
+                              )}
+                            </td>
+
+                            {/* 7. Timer */}
+                            <td>
+                              <div className="feed-status-cell">
+                                <span
+                                  className={`chip-badge chip-timer-${timerInfo.type}`}
+                                >
+                                  {timerInfo.type === 'urgent' && (
+                                    <Timer size={13} className="spin-gentle" />
+                                  )}
+                                  {timerInfo.type === 'active' && <Timer size={13} />}
+                                  {timerInfo.type === 'waiting' && <Clock size={12} />}
+                                  <span>{timerInfo.label}</span>
+                                </span>
+                                {timerInfo.pct !== undefined && timerInfo.pct > 0 && (
+                                  <div className="timer-track">
+                                    <div
+                                      className={`timer-track-bar ${
+                                        timerInfo.type === 'urgent' ? 'urgent' : ''
+                                      }`}
+                                      style={{ width: `${timerInfo.pct}%` }}
+                                    />
+                                  </div>
+                                )}
+                                <span
+                                  className={`chip-subtext ${
+                                    timerInfo.type === 'expired'
+                                      ? 'danger'
+                                      : timerInfo.type === 'urgent'
+                                      ? 'warning'
+                                      : 'text-muted'
+                                  }`}
+                                >
+                                  {timerInfo.sub}
+                                </span>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Admin Broadcast Tab */}
         {activeTab === 'broadcast' && (
